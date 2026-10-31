@@ -1,0 +1,345 @@
+================================================================================
+  GGUFuzz: Structure-Aware Fuzzing and CVE Weaponization
+  for AI Model File Parsers
+================================================================================
+
+  Dr. Sapna V M
+  Associate Professor, Department of Computer Science
+  PES University, Bengaluru, India
+
+  Source: https://github.com/p17433308-cmyk/GGUFuzz
+
+--------------------------------------------------------------------------------
+ABSTRACT
+--------------------------------------------------------------------------------
+The AI community adopted GGUF, safetensors, and ONNX as "safe" replacements
+for Python's pickle format, eliminating arbitrary code execution during model
+deserialization. However, the C/C++ parsers that load these formats contain
+memory corruption vulnerabilities — heap buffer overflows, out-of-bounds writes,
+and arbitrary memory read/write primitives — that are equally exploitable. In
+2025-2026 alone, eight CVEs have been published against llama.cpp, vLLM, and
+HuggingFace Datasets, with CVSS scores reaching 9.8 and 10.0. No offensive
+security tool exists to systematically discover and exploit this attack surface.
+
+We present GGUFuzz, the first open-source weaponization framework for AI model
+file parsers. GGUFuzz implements complete file builders for GGUF (llama.cpp's
+native format), safetensors (HuggingFace's tensor format), and ONNX (the Open
+Neural Network Exchange format) in pure Python (standard library only). It
+provides 21 structure-aware mutations across all three formats, 8 CVE-specific
+weaponizers that craft raw bytes targeting exact vulnerabilities, a coverage-
+guided fuzzing engine with AFL-style bitmap tracking, automatic crash
+classification with exploitability rating, and a supply chain attack simulator
+demonstrating the upload-to-execution attack chain through model registries.
+
+--------------------------------------------------------------------------------
+1. INTRODUCTION
+--------------------------------------------------------------------------------
+Large language models are distributed as files: GGUF for llama.cpp and its
+ecosystem (Ollama, LM Studio, GPT4All), safetensors for HuggingFace
+Transformers, and ONNX for cross-framework deployment. These formats were
+designed to be safe — no embedded code, no arbitrary object instantiation —
+unlike pickle, which executes arbitrary Python during deserialization.
+
+The safety assumption is wrong. The C/C++ parsers that read these files perform
+complex operations: parsing variable-length headers, decoding metadata key-value
+pairs, computing tensor memory layouts, validating alignment constraints, and
+memory-mapping multi-gigabyte data sections. Each of these operations is a
+potential source of memory corruption.
+
+The 2025-2026 CVE record confirms this:
+  * CVE-2026-33298: Heap buffer overflow in llama.cpp's GGUF string parser
+  * CVE-2025-49847: Heap overflow in tensor info parsing
+  * CVE-2026-27940: Array overflow in GGUF metadata
+  * CVE-2026-43629: KV-cache heap overflow
+  * CVE-2026-21869: Out-of-bounds write via negative n_discard
+  * CVE-2026-34159: Arbitrary memory read/write in llama.cpp RPC (CVSS 9.8)
+  * CVE-2025-32444: Pickle deserialization RCE in vLLM (CVSS 10.0)
+
+These vulnerabilities are supply-chain-weaponizable: an attacker uploads a
+malicious model to a public registry (Ollama Library, HuggingFace Hub,
+ModelScope), a victim downloads it, and the parser crashes or executes
+attacker-controlled code during model loading — before any inference occurs.
+
+Contributions:
+  * Complete file builders for GGUF v3, safetensors, and ONNX in pure Python,
+    enabling programmatic construction of valid and malformed model files.
+  * 21 structure-aware mutations (12 GGUF, 3 safetensors, 6 ONNX) targeting
+    header fields, tensor metadata, alignment, and data sections.
+  * 8 CVE-specific weaponizers that generate malicious model files triggering
+    exact vulnerabilities in llama.cpp, vLLM, and HuggingFace Datasets.
+  * A coverage-guided fuzzing engine with AFL-style 64KB bitmap, energy-based
+    corpus scheduling, and corpus minimization.
+  * Automatic crash classification with ASAN report parsing, signal-based
+    analysis, and exploitability rating.
+  * A supply chain attack simulator demonstrating the full attack chain from
+    weaponization through registry distribution to exploitation.
+
+--------------------------------------------------------------------------------
+2. BACKGROUND
+--------------------------------------------------------------------------------
+2.1 GGUF Format
+GGUF (GGML Universal File) is the native model format for llama.cpp. A GGUF
+file begins with a 4-byte magic number (0x46554747, "GGUF" in little-endian),
+followed by a 4-byte version number, an 8-byte tensor count, and an 8-byte
+metadata key-value count. The header is followed by metadata key-value pairs
+(each with a string key, a type tag from 13 possible types, and a value), then
+tensor info entries (name, number of dimensions, dimension sizes, data type from
+24+ quantization types, and data offset), then aligned tensor data.
+
+The parser must handle variable-length strings (length-prefixed), nested arrays,
+multiple integer widths, and alignment padding — all in C with manual memory
+management.
+
+2.2 Safetensors Format
+Safetensors uses a simple layout: an 8-byte little-endian header length, a JSON
+header describing tensor names, data types, shapes, and byte offsets, followed
+by raw tensor data. The JSON header is parsed by a C JSON parser that must
+handle arbitrary-length strings, deeply nested structures, and potentially
+malformed UTF-8.
+
+2.3 ONNX Format
+ONNX uses Protocol Buffers (protobuf) encoding. The model file contains a
+ModelProto with nested GraphProto, TensorProto, NodeProto, and
+ValueInfoProto messages. Protobuf uses varint encoding for integers and
+length-delimited encoding for strings and nested messages, creating a complex
+binary format that C++ parsers must decode correctly.
+
+2.4 Threat Model
+The attacker creates a malicious model file and distributes it through a public
+model registry (Ollama Library, HuggingFace Hub, ModelScope). The victim
+downloads the model using standard tools (ollama pull, huggingface-cli download)
+and loads it with the target application. The malicious file triggers a
+vulnerability during parsing — before any model inference occurs. The attacker
+achieves code execution, denial of service, or information disclosure depending
+on the specific vulnerability.
+
+--------------------------------------------------------------------------------
+3. FRAMEWORK ARCHITECTURE
+--------------------------------------------------------------------------------
+GGUFuzz is organized as builders, mutators, fuzzers, weaponizers, and utilities,
+all in pure Python (standard library only):
+
+  ggufuzz/
+    formats.py         GGUF/Safetensors/ONNX file builders
+    mutators.py        Structure-aware mutations (12 + 3 + 6 = 21 total)
+    fuzzer.py          Subprocess-based fuzzer with crash classification
+    coverage.py        Coverage-guided fuzzer (AFL-style bitmap, corpus mgmt)
+    weaponizer.py      CVE-specific weaponized model generators (8 CVEs)
+    supply_chain.py    Supply chain attack simulation
+    reporter.py        JSON/Markdown/terminal crash reports
+    cli.py             fuzz / weaponize / list-cves / supply-chain / validate / demo
+
+Dependencies: none. The entire framework runs on Python 3.8+ with only the
+standard library.
+
+--------------------------------------------------------------------------------
+4. MODEL FILE BUILDERS
+--------------------------------------------------------------------------------
+4.1 GGUF Builder
+The GGUF builder constructs valid GGUF v3 files from Python dataclasses:
+GGUFHeader, GGUFMetadataKV, GGUFTensorInfo, and GGUFFile. The build_gguf()
+function serializes these into the exact binary layout expected by llama.cpp's
+parser: little-endian integers, length-prefixed strings, type-tagged metadata
+values, and 32-byte-aligned tensor data. build_minimal_gguf() produces a valid
+file with one tensor and two metadata entries, suitable as a fuzzing seed.
+
+4.2 Safetensors Builder
+The safetensors builder constructs files with correct header lengths and tensor
+data offsets. build_safetensors() takes a dictionary of tensor specifications
+(name, dtype, shape, size) and produces a valid file with the JSON header and
+zero-filled tensor data at the correct offsets.
+
+4.3 ONNX Builder
+The ONNX builder implements protobuf encoding from scratch: varint encoding for
+integers, length-delimited encoding for strings and nested messages, and field
+tag encoding. build_onnx_model() produces a valid ONNX ModelProto with a graph
+containing initializer tensors and a Relu node.
+
+--------------------------------------------------------------------------------
+5. STRUCTURE-AWARE MUTATIONS
+--------------------------------------------------------------------------------
+5.1 GGUF Mutations (12)
+Each mutation targets a specific field or invariant in the GGUF format:
+  * corrupt_magic: Replace the 4-byte magic with zeros
+  * corrupt_version: Set version to 1 (unsupported, triggers version checks)
+  * corrupt_tensor_count: Set tensor count to 0xFFFFFFFF (allocation overflow)
+  * corrupt_metadata_count: Set metadata count to 0xFFFFFFFF
+  * corrupt_tensor_dimensions: Add 128 dimensions (exceeds GGML_MAX_DIMS)
+  * corrupt_tensor_offset: Set data offset to 0xFFFFFFFF (out-of-bounds read)
+  * corrupt_tensor_dtype: Set dtype to 255 (invalid quantization type)
+  * corrupt_string_length: Set metadata string length to 65535 (heap overflow)
+  * corrupt_metadata_type: Set metadata type tag to invalid value
+  * overlapping_tensors: Create two tensors at overlapping offsets
+  * empty_file: Produce a minimal file with zero tensors and zero metadata
+  * alignment_corruption: Shift tensor data to break 32-byte alignment
+
+5.2 Safetensors Mutations (3)
+  * corrupt_header_length: Set the 8-byte header length to 0xFFFFFFFF
+  * corrupt_json_header: Inject control characters into JSON keys
+  * truncate: Remove the last 25% of the file
+
+5.3 ONNX Mutations (6)
+  * corrupt_ir_version: Set IR version to 0x7FFFFFFF
+  * corrupt_tensor_dims: Add 512 dimensions to an initializer
+  * corrupt_data_type: Set tensor data type to 0xFF
+  * corrupt_raw_data_size: Append 4KB of 0xFF bytes to raw data
+  * corrupt_protobuf_lengths: Mangle varint length fields
+  * truncate: Remove the last 50% of the file
+
+--------------------------------------------------------------------------------
+6. CVE WEAPONIZATION
+--------------------------------------------------------------------------------
+Each weaponizer crafts a model file that triggers a specific CVE:
+
+6.1 CVE-2026-33298 (llama.cpp GGUF Heap Overflow)
+Crafts a GGUF file with a metadata string whose length field claims 4096 bytes
+but whose actual data is only 16 bytes, triggering a heap buffer overflow in
+gguf_get_val_str() when the parser copies length bytes from a short buffer.
+
+6.2 CVE-2025-49847 (llama.cpp Tensor Info Overflow)
+Creates a GGUF file with a tensor whose n_dims field is 64 (exceeds the
+stack-allocated dimension array), causing a stack buffer overflow during
+tensor info parsing.
+
+6.3 CVE-2026-27940 (llama.cpp Array Overflow)
+Constructs a metadata array entry with count 0xFFFFFFFF, causing integer
+overflow in the allocation size calculation (count * element_size wraps to a
+small value), then overflows the undersized buffer during parsing.
+
+6.4 CVE-2026-43629 (llama.cpp KV-Cache Overflow)
+Builds a valid GGUF model with metadata specifying extreme n_ctx (context
+length) values, causing heap overflow in the KV-cache allocation path.
+
+6.5 CVE-2026-21869 (llama.cpp OOB Write)
+Crafts metadata with a negative n_discard value (stored as int32), causing an
+out-of-bounds write when the value is used as an array index without sign check.
+
+6.6 CVE-2026-34159 (llama.cpp RPC Arbitrary R/W, CVSS 9.8)
+Generates an RPC request payload that exploits the lack of bounds checking in
+llama.cpp's RPC server, enabling arbitrary memory read/write on the host.
+
+6.7 CVE-2025-32444 (vLLM Pickle RCE, CVSS 10.0)
+Creates a pickle payload with os.system() execution, targeting vLLM's
+deserialization of untrusted model artifacts.
+
+--------------------------------------------------------------------------------
+7. COVERAGE-GUIDED FUZZING
+--------------------------------------------------------------------------------
+The CoverageGuidedFuzzer extends the basic fuzzer with AFL-style coverage
+tracking:
+
+  * CoverageBitmap: 64KB shared-memory bitmap tracking edge coverage. Each
+    byte represents a (source_block, dest_block) transition, hashed to the
+    bitmap index. New coverage means the mutated input reached a new code path.
+
+  * CorpusManager: Energy-based corpus scheduling where inputs that found new
+    coverage get more mutation budget. Corpus minimization removes inputs that
+    provide no unique coverage.
+
+  * Parallel execution: ProcessPoolExecutor-based parallel fuzzing with
+    per-worker bitmaps merged into the global bitmap.
+
+  * Output-based coverage fallback: When SHM-based coverage is unavailable,
+    the fuzzer hashes stderr/stdout to approximate coverage (different error
+    messages suggest different code paths).
+
+--------------------------------------------------------------------------------
+8. CRASH CLASSIFICATION
+--------------------------------------------------------------------------------
+When the target process crashes, GGUFuzz classifies the crash:
+
+  * CrashType: SEGFAULT (signal 11), ABORT (signal 6), FLOATING_POINT
+    (signal 8), BUS_ERROR (signal 7), TIMEOUT, ASAN_ERROR, OTHER
+
+  * Exploitability: Parsed from ASAN reports when available:
+    - EXPLOITABLE: heap-buffer-overflow, stack-buffer-overflow, use-after-free,
+      double-free, heap-use-after-free
+    - PROBABLY_EXPLOITABLE: stack-overflow, global-buffer-overflow
+    - UNKNOWN: unrecognized ASAN patterns or crash without ASAN
+    - NOT_EXPLOITABLE: specific patterns indicating non-exploitable states
+
+  * Deduplication: SHA256 hash of (crash_type, signal, ASAN report first line)
+    ensures each unique crash is reported once.
+
+--------------------------------------------------------------------------------
+9. SUPPLY CHAIN SIMULATION
+--------------------------------------------------------------------------------
+The SupplyChainSimulator models the full attack chain:
+
+  Phase 1 — Weaponization: Generate a malicious model file using the specified
+  CVE weaponizer.
+
+  Phase 2 — Distribution: Simulate uploading the weaponized model to a public
+  registry (Ollama Library, HuggingFace Hub, or ModelScope).
+
+  Phase 3 — Delivery: Model the victim's download path using standard tools
+  (ollama pull, huggingface-cli download, modelscope download).
+
+  Phase 4 — Exploitation: Describe the parser vulnerability triggered during
+  model loading.
+
+  Phase 5 — Impact: Assess the potential impact (code execution, DoS,
+  information disclosure) based on the CVE severity and type.
+
+The simulator produces JSON and Markdown reports documenting each phase. It
+does NOT perform any actual uploads — the simulation is entirely offline.
+
+--------------------------------------------------------------------------------
+10. EVALUATION
+--------------------------------------------------------------------------------
+We validated GGUFuzz with a test suite of 29 cases covering:
+  * GGUF file construction (magic, version, tensor count, minimum size)
+  * Safetensors construction (JSON header, multiple tensors, minimal files)
+  * ONNX construction (protobuf output, minimal files)
+  * All 21 mutators produce valid output (no crashes in the mutation layer)
+  * All 8 CVE weaponizers generate non-empty output files
+  * Coverage bitmap and corpus manager operations
+  * Crash report generation (JSON + Markdown)
+  * Model validation (valid GGUF, corrupt GGUF, valid safetensors)
+  * Supply chain simulation execution
+  * Module exports (38 symbols)
+
+The demo command exercises the full pipeline — file construction across all
+three formats, all 21 structure-aware mutations, all 8 CVE weaponizers, model
+validation, and supply chain simulation — producing real binary output with
+no external dependencies.
+
+--------------------------------------------------------------------------------
+11. RESPONSIBLE USE
+--------------------------------------------------------------------------------
+GGUFuzz is intended for authorized security testing only: fuzzing your own
+model parsers, testing your inference infrastructure, and authorized
+penetration testing engagements. All CVE weaponizers target already-patched
+vulnerabilities. The supply chain simulator is entirely offline and does not
+perform any actual uploads. The demo command operates without any target binary.
+
+The vulnerabilities GGUFuzz exercises affect widely-deployed AI infrastructure
+— llama.cpp alone has millions of users through Ollama, LM Studio, and
+GPT4All. Responsible disclosure of new vulnerabilities discovered with this
+tool is essential.
+
+--------------------------------------------------------------------------------
+12. CONCLUSION
+--------------------------------------------------------------------------------
+The "safe" model formats adopted by the AI community are not safe. Their C/C++
+parsers contain the same classes of memory corruption vulnerabilities that
+plague any complex binary parser. GGUFuzz provides the first systematic
+offensive tool for this attack surface: format-aware builders for GGUF,
+safetensors, and ONNX, 21 structure-aware mutations, 8 CVE weaponizers,
+coverage-guided fuzzing, and supply chain simulation. It enables security
+researchers to assess and improve the parser security of AI model loading
+infrastructure.
+
+--------------------------------------------------------------------------------
+REFERENCES (SELECTED)
+--------------------------------------------------------------------------------
+  [1] GGML/GGUF Specification — https://github.com/ggerganov/ggml/blob/master/docs/gguf.md
+  [2] Safetensors Format — https://huggingface.co/docs/safetensors/
+  [3] ONNX Specification — https://onnx.ai/onnx/intro/
+  [4] llama.cpp — https://github.com/ggerganov/llama.cpp
+  [5] CVE-2026-34159 — llama.cpp RPC arbitrary read/write (CVSS 9.8)
+  [6] CVE-2025-32444 — vLLM pickle deserialization RCE (CVSS 10.0)
+  [7] American Fuzzy Lop (AFL) — https://lcamtuf.coredump.cx/afl/
+  [8] AddressSanitizer — https://clang.llvm.org/docs/AddressSanitizer.html
+
+================================================================================

@@ -1,0 +1,50 @@
+{
+  "simulation": "GGUFuzz Supply Chain Attack",
+  "cve": "CVE-2026-33298",
+  "registry": "ollama",
+  "timestamp": "2026-10-26T13:09:34Z",
+  "attack_chain": [
+    {
+      "phase": "1. Weaponization",
+      "action": "Generate malicious model file",
+      "detail": "GGUFuzz generates a weaponized GGUF file targeting CVE-2026-33298: Heap overflow in GGUF metadata string parser\n  File: sim_output/weaponized_model.gguf (4152 bytes, SHA256: 51aa46e26f2c3259...)",
+      "risk": "Attacker creates a model file that appears valid but contains crafted data triggering memory corruption in the parser.",
+      "mitigation": null
+    },
+    {
+      "phase": "2. Distribution",
+      "action": "Upload to Ollama Model Library",
+      "detail": "Attacker uploads the weaponized model to Ollama Model Library. Auth required: False. Current scanning: None (no model file scanning).",
+      "risk": "Model registries do not scan GGUF files for memory corruption payloads. Pickle scanning (where it exists) is irrelevant for this attack vector.",
+      "mitigation": "Format-aware model file scanning (does not exist today)"
+    },
+    {
+      "phase": "3. Delivery",
+      "action": "Victim downloads model",
+      "detail": "Victim runs: `ollama pull attacker/evil-model`\n  The model is downloaded and stored locally with no integrity verification beyond basic checksums (which match, since the file is intentionally crafted).",
+      "risk": "Users routinely download and run models from public registries with no security review.",
+      "mitigation": null
+    },
+    {
+      "phase": "4. Exploitation",
+      "action": "Model loading triggers vulnerability",
+      "detail": "When the victim loads the model, the llama.cpp GGUF parser parses the GGUF header. The crafted data triggers heap-buffer-overflow, achieving code execution in the context of the inference process.",
+      "risk": "Full code execution on the victim's machine. The inference process typically runs with the user's full privileges (no sandboxing in Ollama, llama.cpp, or vLLM).",
+      "mitigation": null
+    },
+    {
+      "phase": "5. Impact",
+      "action": "Post-exploitation",
+      "detail": "With code execution achieved, the attacker can:\n  - Exfiltrate all other locally stored models\n  - Access API keys and credentials in the user's environment\n  - Establish persistence\n  - Pivot to other systems on the network\n  - Modify other models to propagate (wormable)",
+      "risk": "AI infrastructure typically has access to sensitive data, API keys, and network resources. Compromise of an inference server is high-impact.",
+      "mitigation": null
+    }
+  ],
+  "recommendations": [
+    "Implement format-aware scanning for GGUF/safetensors in model registries",
+    "Run model loading in sandboxed environments (seccomp, gVisor)",
+    "Verify model file integrity with signed checksums from trusted sources",
+    "Use AddressSanitizer builds for model loading in CI/CD pipelines",
+    "Monitor for anomalous behavior after model loading (unexpected syscalls, network activity)"
+  ]
+}

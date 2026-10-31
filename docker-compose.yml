@@ -1,0 +1,26 @@
+version: "3.8"
+
+services:
+  ggufuzz-gguf:
+    build: .
+    volumes:
+      - ./output/gguf:/output
+    command: >
+      fuzz --format gguf
+      --target "/opt/llama.cpp/build/bin/llama-cli --model {input} -n 1"
+      --output /output --iterations 5000 --coverage --timeout 5
+
+  ggufuzz-safetensors:
+    build: .
+    volumes:
+      - ./output/safetensors:/output
+    command: >
+      fuzz --format safetensors
+      --target "/opt/llama.cpp/build/bin/llama-cli --model {input} -n 1"
+      --output /output --iterations 2000 --timeout 5
+
+  weaponize:
+    build: .
+    volumes:
+      - ./output/payloads:/output
+    command: weaponize --cve all --output /output
