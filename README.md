@@ -30,7 +30,7 @@ The AI community moved from pickle to GGUF/safetensors thinking they solved the 
 - **Coverage-guided mode** — AFL-style 64KB bitmap, energy-based corpus scheduling, corpus minimization, parallel execution
 
 ### CVE Weaponization
-- **8 CVE weaponizers** — Each crafts raw bytes targeting the exact vulnerability
+- **7 CVE weaponizers** — Each crafts raw bytes targeting the exact vulnerability
 - **Automatic model generation** — `weaponize --cve all` generates all payloads
 - **Per-CVE targeting** — Heap overflows, OOB writes, arbitrary R/W, deserialization RCE
 
